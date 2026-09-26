@@ -12,7 +12,30 @@
 make
 ```
 
-成果物は `bin/app-window-switcher`。
+成果物は次の二つです。
+
+- `bin/app-window-switcher` はシェルスクリプトです。
+- `bin/AppWindowSwitcher.app` は署名済みアプリです。
+
+## シェルスクリプトと .app
+
+この二つは同じ処理の複製ではありません。片方を消すと、残った方だけでは動きません。
+
+| ファイル | 役割 |
+|---|---|
+| `bin/app-window-switcher` | 引数を受け、`.app` を `open` し、結果の標準出力と終了コードを返す |
+| `bin/AppWindowSwitcher.app` | Accessibility の呼び出しと、窓の選択・raise を行う |
+
+アクセシビリティの許可は、起動したプログラム自身に付きます。ターミナルや skhd が中のバイナリを直接実行すると、判定対象は親のままで、AX の呼び出しは `-25204` になります。`.app` を `open` で起動すると、判定対象が `com.github.haruyama480.app-window-switcher` になります。だから `.app` は消せません。
+
+`open` だけでは `list` の出力を受け取れません。`open -W` はこのアプリのプロセス番号を取れず、`GetProcessPID()` が「プロセスがない」（`-600`）を返します。シェルスクリプトは `open -W` を使わず、アプリが書いた結果を待って表示します。`list` の表示や終了コードを使うなら、シェルスクリプトも消せません。
+
+skhd から `next` と `prev` だけ呼ぶなら、シェルスクリプトの代わりに次を書けます。
+
+```
+open -n -g /ABSOLUTE/PATH/bin/AppWindowSwitcher.app --args next
+open -n -g /ABSOLUTE/PATH/bin/AppWindowSwitcher.app --args prev
+```
 
 ## 使い方
 
@@ -33,19 +56,13 @@ bin/app-window-switcher list
 
 ## 権限
 
-`bin/app-window-switcher` は、自分自身を `bin/AppWindowSwitcher.app` として起動し直します。ターミナルや skhd からバイナリを直接 AX 呼び出しすると、許可の判定対象は親プロセスのままになり、このプログラムのスイッチは使われません。
-
-初回は次を実行してください。許可ダイアログは最大 60 秒開いたままになります。AppWindowSwitcher を許可すると、その実行の続きで `list` が出ます。署名は Apple Development 証明書です。ad-hoc のときに入れた許可は、この署名には引き継がれません。
+初回は次を実行してください。許可ダイアログは最大 60 秒開いたままになります。AppWindowSwitcher を許可すると、その実行の続きで `list` が出ます。
 
 ```
 bin/app-window-switcher list
 ```
 
-再ビルドすると ad-hoc 署名の cdhash が変わるので、許可を入れ直すことがあります。
-
-- システム設定 → プライバシーとセキュリティ → アクセシビリティ
-
-一覧に実行ファイルが出ないときは、起動元の skhd やターミナルを追加する。`.app` は作らない。
+許可するのは `bin/AppWindowSwitcher.app` です。場所は「システム設定 → プライバシーとセキュリティ → アクセシビリティ」です。署名は Apple Development 証明書で、identifier は `com.github.haruyama480.app-window-switcher` です。同じ証明書と同じ identifier で再ビルドした許可は引き継がれます。
 
 ## skhd
 
@@ -60,7 +77,7 @@ alt + shift + ctrl + shift - 0x32 : $(pwd)/bin/app-window-switcher prev
 EOF
 ```
 
-このコマンドが `AppWindowSwitcher.app` を `open` します。skhd に `open` を直接書かなくて構いません。
+このコマンドはシェルスクリプトです。中で `AppWindowSwitcher.app` を `open` します。`next` と `prev` だけなら、上の「シェルスクリプトと .app」にある `open` を skhd に直接書いても同じです。
 
 ## 制限
 
