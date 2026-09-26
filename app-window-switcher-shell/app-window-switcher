@@ -1,0 +1,258 @@
+#!/bin/sh
+# Cycle standard windows of the frontmost macOS app by spatial position.
+set -eu
+
+usage() {
+  cat <<'EOF'
+使い方: app-window-switcher <command>
+
+コマンド:
+  next     前面アプリの次のウィンドウを上げる
+  prev     前面アプリの前のウィンドウを上げる
+  list     対象ウィンドウを位置順に表示する
+  help     この使い方を表示する
+EOF
+}
+
+permission_denied() {
+  printf '%s\n' "$1" | grep -Eq -- '-25211|-1743|[Aa]ssistive|[Nn]ot authorized'
+}
+
+if [ "$#" -eq 1 ]; then
+  case "$1" in
+    help|-h|--help)
+      usage
+      exit 0
+      ;;
+  esac
+fi
+
+if [ "$#" -eq 0 ]; then
+  usage >&2
+  exit 2
+fi
+
+if [ "$#" -ne 1 ]; then
+  echo "引数が多すぎます。" >&2
+  usage >&2
+  exit 2
+fi
+
+cmd=$1
+case "$cmd" in
+  next|prev|list) ;;
+  *)
+    echo "未知のコマンド: $cmd" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
+if ! command -v osascript >/dev/null 2>&1; then
+  echo "app-window-switcher: osascript が見つかりません。" >&2
+  exit 1
+fi
+
+stdout_file=$(mktemp "${TMPDIR:-/tmp}/app-window-switcher.out.XXXXXX")
+stderr_file=$(mktemp "${TMPDIR:-/tmp}/app-window-switcher.err.XXXXXX")
+trap 'rm -f "$stdout_file" "$stderr_file"' EXIT
+
+set +e
+osascript - "$cmd" >"$stdout_file" 2>"$stderr_file" <<'APPLESCRIPT'
+on run argv
+	set scriptCmd to item 1 of argv
+	set winRefs to {}
+	tell application "System Events"
+		set frontProc to first application process whose frontmost is true
+		tell frontProc
+			set winRefs to windows
+		end tell
+	end tell
+	set ordered to {}
+	set winCount to count of winRefs
+	repeat with i from 1 to winCount
+		set idx to i as integer
+		set winRef to item idx of winRefs
+		if my isEligible(winRef) then
+			set end of ordered to my rowFor(winRef, idx)
+		end if
+	end repeat
+	set ordered to my sortRows(ordered)
+	if scriptCmd is "list" then return my renderList(ordered)
+	set n to count of ordered
+	if n <= 1 then return ""
+	set currentIndex to my currentSpatialIndex(ordered)
+	if scriptCmd is "next" then
+		set targetIndex to currentIndex + 1
+		if targetIndex > n then set targetIndex to 1
+	else
+		set targetIndex to currentIndex - 1
+		if targetIndex < 1 then set targetIndex to n
+	end if
+	set zIndex to (z of (item targetIndex of ordered)) as integer
+	set targetWin to item zIndex of winRefs
+	tell application "System Events"
+		perform action "AXRaise" of targetWin
+		set value of attribute "AXMain" of targetWin to true
+	end tell
+	return ""
+end run
+
+on isEligible(winRef)
+	set eligible to true
+	set isMinimized to false
+	tell application "System Events"
+		try
+			if (subrole of winRef) is not "AXStandardWindow" then set eligible to false
+		on error
+			set eligible to false
+		end try
+		try
+			if (value of attribute "AXMinimized" of winRef) is true then set isMinimized to true
+		end try
+	end tell
+	if eligible is false or isMinimized is true then return false
+	return true
+end isEligible
+
+on rowFor(winRef, zIndex)
+	set originX to 0
+	set originY to 0
+	set winW to 0
+	set winH to 0
+	set isMain to false
+	set windowTitle to ""
+	tell application "System Events"
+		try
+			set pos to position of winRef
+			set originX to item 1 of pos
+			set originY to item 2 of pos
+		end try
+		try
+			set siz to size of winRef
+			set winW to item 1 of siz
+			set winH to item 2 of siz
+		end try
+		try
+			if (value of attribute "AXMain" of winRef) is true then set isMain to true
+		end try
+		try
+			set windowTitle to title of winRef
+		end try
+		if windowTitle is missing value or windowTitle is "" then
+			try
+				set windowTitle to name of winRef
+			end try
+		end if
+	end tell
+	if windowTitle is missing value then set windowTitle to ""
+	set originX to (round originX) as integer
+	set originY to (round originY) as integer
+	set winW to (round winW) as integer
+	set winH to (round winH) as integer
+	return {x:originX, y:originY, wid:winW, hei:winH, title:my oneLine(windowTitle as text), main:isMain, z:zIndex}
+end rowFor
+
+on oneLine(rawText)
+	set oldDelims to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to {return, linefeed, tab}
+	set parts to text items of rawText
+	set AppleScript's text item delimiters to " "
+	set cleaned to parts as text
+	set AppleScript's text item delimiters to oldDelims
+	return cleaned
+end oneLine
+
+on comesBefore(a, b)
+	if (x of a) < (x of b) then return true
+	if (x of a) > (x of b) then return false
+	if (y of a) < (y of b) then return true
+	if (y of a) > (y of b) then return false
+	set ta to title of a
+	set tb to title of b
+	if ta < tb then return true
+	if ta > tb then return false
+	if (z of a) < (z of b) then return true
+	return false
+end comesBefore
+
+on sortRows(rows)
+	set n to count of rows
+	repeat with i from 2 to n
+		set iInt to i as integer
+		set pivot to item iInt of rows
+		set j to iInt - 1
+		repeat while j >= 1
+			if not my comesBefore(pivot, item j of rows) then exit repeat
+			set item (j + 1) of rows to (item j of rows)
+			set j to j - 1
+		end repeat
+		set item (j + 1) of rows to pivot
+	end repeat
+	return rows
+end sortRows
+
+on currentSpatialIndex(rows)
+	set n to count of rows
+	repeat with i from 1 to n
+		set idx to i as integer
+		if main of (item idx of rows) is true then return idx
+	end repeat
+	set bestI to 1
+	set bestZ to z of (item 1 of rows)
+	repeat with i from 2 to n
+		set idx to i as integer
+		set zz to z of (item idx of rows)
+		if zz < bestZ then
+			set bestZ to zz
+			set bestI to idx
+		end if
+	end repeat
+	return bestI
+end currentSpatialIndex
+
+on renderList(rows)
+	set oldDelims to AppleScript's text item delimiters
+	set parts to {}
+	set n to count of rows
+	repeat with i from 1 to n
+		set idx to i as integer
+		set r to item idx of rows
+		set mainBit to "0"
+		if main of r is true then set mainBit to "1"
+		set end of parts to (idx as text) & " main=" & mainBit & " x=" & (x of r as text) & " y=" & (y of r as text) & " w=" & (wid of r as text) & " h=" & (hei of r as text) & " title=" & (title of r)
+	end repeat
+	set AppleScript's text item delimiters to linefeed
+	set rendered to parts as text
+	set AppleScript's text item delimiters to oldDelims
+	return rendered
+end renderList
+APPLESCRIPT
+status=$?
+set -e
+
+if [ "$status" -ne 0 ]; then
+  err=$(cat "$stderr_file" 2>/dev/null || true)
+  if permission_denied "$err"; then
+    cat >&2 <<'EOF'
+app-window-switcher: System Events で窓を操作できません。
+次を確認してください。
+  System Settings → Privacy & Security → Accessibility
+  System Settings → Privacy & Security → Automation
+このコマンドを起動したアプリ（skhd やターミナル）に許可が必要です。
+EOF
+    if [ -n "$err" ]; then
+      printf '\n%s\n' "$err" >&2
+    fi
+  elif [ -n "$err" ]; then
+    printf '%s\n' "$err" >&2
+  else
+    echo "app-window-switcher: osascript が失敗しました。" >&2
+  fi
+  exit 1
+fi
+
+if [ "$cmd" = "list" ]; then
+  cat "$stdout_file"
+fi
+exit 0
